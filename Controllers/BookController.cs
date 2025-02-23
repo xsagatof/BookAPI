@@ -3,13 +3,14 @@ using BookAPI.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using static System.Reflection.Metadata.BlobBuilder;
 
 namespace BookAPI.Controllers
 {
 	[Route("api/[controller]")]
 	[ApiController]
-	//[Authorize]
+	[Authorize]
 	public class BookController : ControllerBase
 	{
 		private readonly ApplicationDbContext _context;
@@ -20,34 +21,92 @@ namespace BookAPI.Controllers
 		}
 
 		[HttpGet]
-		public IActionResult GetAllItems()
+		public async Task<ActionResult<IEnumerable<string>>> GetListOfAllBooks(int pageNumber = 1, int pageSize = 10)
 		{
-			return Ok(_context.Books);
+			if (pageNumber < 1 || pageSize < 1)
+			{
+				return BadRequest("Invalid page number or page size.");
+			}
+
+			var totalBooks = await _context.Books.CountAsync();
+			var totalPages = (int)Math.Ceiling((double)totalBooks / pageSize);
+
+			if (pageNumber > totalPages && totalBooks > 0)
+			{
+				return BadRequest("Page number exceeds total pages.");
+			}
+
+			var bookTitles = await _context.Books
+				.OrderByDescending(book => book.ViewsCount)
+				.Skip((pageNumber - 1) * pageSize)
+				.Take(pageSize)
+				.Select(book => book.Title)
+				.ToListAsync();
+
+			var response = new
+			{
+				TotalItems = totalBooks,
+				TotalPages = totalPages,
+				PageNumber = pageNumber,
+				PageSize = pageSize,
+				Items = bookTitles
+			};
+
+			return Ok(response);
 		}
 
 		[HttpGet]
 		[Route("{id}")]
-		public IActionResult GetItemById(int id)
+		public async Task<IActionResult> GetBookById(int id)
 		{
-			var task = _context.Books.Find(id);
+			var task = await _context.Books.FindAsync(id);
 			if (task == null)
 				return NotFound();
 			return Ok(task);
 		}
 
 		[HttpPost]
-		public IActionResult AddNewItem(Book book)
+		public async Task<ActionResult<IEnumerable<Book>>> AddBooks([FromBody] List<Book> books)
 		{
-			_context.Books.Add(book);
-			_context.SaveChanges();
-			return CreatedAtAction("GetAllItems", book);
+			if (books == null || books.Count == 0)
+			{
+				return BadRequest("No books provided.");
+			}
+
+			var existingTitles = await _context.Books.Select(b => b.Title).ToListAsync();
+
+			var booksToAdd = new List<Book>();
+			var duplicateTitles = new List<string>();
+
+			foreach (var book in books)
+			{
+				if (existingTitles.Contains(book.Title))
+				{
+					duplicateTitles.Add(book.Title);
+				}
+				else
+				{
+					booksToAdd.Add(book);
+					existingTitles.Add(book.Title);
+				}
+			}
+
+			if (duplicateTitles.Count > 0)
+			{
+				return BadRequest($"Books with the following titles already exist: {string.Join(", ", duplicateTitles)}");
+			}
+
+			_context.Books.AddRange(booksToAdd);
+			await _context.SaveChangesAsync();
+
+			return CreatedAtAction(nameof(GetListOfAllBooks), booksToAdd);
 		}
 
 		[HttpPut]
 		[Route("{id}")]
-		public IActionResult UpdateItem(Book book)
+		public async Task<IActionResult> UpdateBook(Book book)
 		{
-			var dbBook = _context.Books.Find(book.Id);
+			var dbBook = await _context.Books.FindAsync(book.Id);
 			if (dbBook == null)
 				return NotFound();
 
@@ -56,22 +115,44 @@ namespace BookAPI.Controllers
 			dbBook.PublicationYear = book.PublicationYear;
 			dbBook.ViewsCount = book.ViewsCount;
 
-			_context.SaveChanges();
+			await _context.SaveChangesAsync();
 
 			return Ok(_context.Books);
 		}
 
-		[HttpDelete]
-		public IActionResult DeleteItem(int id)
+		[HttpDelete("{id}")]
+		public async Task<IActionResult> DeleteBook(int id)
 		{
-			var dbBook = _context.Books.Find(id);
-			if (dbBook == null)
+			var book = await _context.Books.FindAsync(id);
+			if (book == null)
+			{
 				return NotFound();
+			}
 
-			_context.Books.Remove(dbBook);
-			_context.SaveChanges();
+			_context.Books.Remove(book);
+			await _context.SaveChangesAsync();
 
-			return Ok(_context.Books);
+			return NoContent();
+		}
+
+		[HttpDelete]
+		public async Task<IActionResult> DeleteBooks([FromBody] List<int> ids)
+		{
+			if (ids == null || ids.Count == 0)
+			{
+				return BadRequest("No book IDs provided.");
+			}
+
+			var booksToDelete = await _context.Books.Where(b => ids.Contains(b.Id)).ToListAsync();
+			if (booksToDelete.Count == 0)
+			{
+				return NotFound("No books found with the provided IDs.");
+			}
+
+			_context.Books.RemoveRange(booksToDelete);
+			await _context.SaveChangesAsync();
+
+			return NoContent();
 		}
 	}
 }
